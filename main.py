@@ -1,130 +1,135 @@
-import pandas as pd
-from transformers import GPT2LMHeadModel, GPT2Tokenizer
-import torch
-import os
 from dotenv import load_dotenv
-import re
+import pandas as pd
+from transformers import GPT2Tokenizer, GPT2LMHeadModel, T5Tokenizer, T5ForConditionalGeneration
+import torch
+from torch.utils.data import Dataset, DataLoader
+from torch.optim import AdamW
+from tqdm import tqdm
+import os
 
-# Memuat variabel dari file .env
+def calculate_ideal_weight(height, weight):
+    height_m = height / 100  # Convert height to meters
+    ideal_bmi = 22.5  # Typical value for a healthy BMI
+    ideal_weight = ideal_bmi * (height_m ** 2)
+    return ideal_weight
+
+def recommend_exercise(model, tokenizer, weight, ideal_weight):
+    weight_diff = weight - ideal_weight
+    goal = "lose weight" if weight_diff > 0 else "maintain weight"
+
+    prompt = f"Recommend an exercise to {goal}."
+    inputs = tokenizer(prompt, return_tensors="pt", padding=True, truncation=True).input_ids
+    outputs = model.generate(inputs, max_length=50, num_return_sequences=1)
+    recommendation = tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+    return recommendation
+
+# Load dataset
+class ExerciseDataset(Dataset):
+    def __init__(self, texts):
+        self.texts = texts
+
+    def __len__(self):
+        return len(self.texts)
+
+    def __getitem__(self, idx):
+        return self.texts[idx]
+
+# Load GPT-2 model and tokenizer
+gpt2_tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+gpt2_tokenizer.add_special_tokens({'pad_token': '[PAD]'})  # Add padding token
+gpt2_model = GPT2LMHeadModel.from_pretrained("gpt2")
+
+def train_gpt2(model, tokenizer, dataset, epochs=3, batch_size=8, lr=5e-5):
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    optimizer = AdamW(model.parameters(), lr=lr)
+
+    # Synchronize tokenizer with model
+    model.resize_token_embeddings(len(tokenizer))
+
+    model.train()
+    for epoch in range(epochs):
+        epoch_loss = 0
+        for batch in tqdm(dataloader, desc=f"Training GPT-2 Epoch {epoch + 1}"):
+            try:
+                inputs = tokenizer(batch, return_tensors="pt", padding=True, truncation=True).input_ids
+                labels = inputs.clone()
+
+                outputs = model(inputs, labels=labels)
+                loss = outputs.loss
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                epoch_loss += loss.item()
+            except IndexError as e:
+                print(f"IndexError encountered: {e}. Skipping batch...")
+                continue  # Skip problematic batch
+        print(f"Epoch {epoch + 1} Loss: {epoch_loss / len(dataloader)}")
+
+# Prepare dataset for GPT-2 training
 load_dotenv()
 dataset_path = os.getenv('DATASET_PATH')
-
-# Memuat dataset
 data = pd.read_csv(dataset_path)
+data['text'] = (
+    data['Title'] + ": " + data['Desc'] + " (" + data['Type'] + ") - " +
+    data['BodyPart'] + " using " + data['Equipment'] + " - Level: " +
+    data['Level'] + " Rating: " + data['RatingDesc']
+).fillna('').astype(str)
+dataset = ExerciseDataset(data['text'].values)
 
-# Gabungkan kolom yang relevan untuk menghasilkan teks
-data['text'] = data['Title'] + ": " + data['Desc'] + " (" + data['Type'] + ") - " + data['BodyPart'] + " using " + data['Equipment'] + " - Level: " + data['Level'] + " Rating: " + data['RatingDesc']
-data['text'] = data['text'].fillna('').astype(str)
-texts = data['text'].values
+# Train GPT-2
+train_gpt2(gpt2_model, gpt2_tokenizer, dataset, epochs=3)
 
-# Load pre-trained GPT-2 model dan tokenizer
-tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
-model = GPT2LMHeadModel.from_pretrained("gpt2")
+def fine_tune_t5(model, tokenizer, dataset, epochs=3, batch_size=8, lr=5e-5):
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    optimizer = AdamW(model.parameters(), lr=lr)
 
-# Fungsi untuk menghasilkan deskripsi latihan baru menggunakan GPT-2
-def generate_exercise_description_gpt(seed_text, num_words=150, keywords=None):
-    # Encode seed text
-    input_ids = tokenizer.encode(seed_text, return_tensors='pt')
-    attention_mask = torch.ones(input_ids.shape, dtype=torch.long)  # Atur attention mask
-    
-    # Generate text using GPT-2
-    output = model.generate(
-        input_ids, 
-        max_length=num_words,  # Panjang output yang lebih besar untuk hasil lebih lengkap
-        num_return_sequences=1,
-        no_repeat_ngram_size=4,  # Mengurangi pengulangan kata
-        top_p=0.85,  # Kurangi nilai ini untuk variasi yang lebih baik
-        temperature=0.7,  # Mengatur suhu untuk variasi teks
-        do_sample=True,
-        attention_mask=attention_mask,
-        pad_token_id=tokenizer.eos_token_id
-    )
-    generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
-    
-    # Validasi dengan kata kunci (untuk meningkatkan relevansi)
-    if keywords:
-        if all(keyword.lower() in generated_text.lower() for keyword in keywords):
-            return generated_text
-        else:
-            print("Generated description does not match keywords. Regenerating...")
-            return generate_exercise_description_gpt(seed_text, num_words, keywords)
-    return generated_text
+    model.train()
+    for epoch in range(epochs):
+        epoch_loss = 0
+        for batch in tqdm(dataloader, desc=f"Training T5 Epoch {epoch + 1}"):
+            try:
+                inputs = tokenizer(batch['input_text'], return_tensors="pt", padding=True, truncation=True).input_ids
+                labels = tokenizer(batch['target_text'], return_tensors="pt", padding=True, truncation=True).input_ids
 
-# Fungsi untuk memvalidasi deskripsi berdasarkan kata kunci yang relevan
-def validate_description(description, keywords):
-    return all(keyword.lower() in description.lower() for keyword in keywords)
+                outputs = model(input_ids=inputs, labels=labels)
+                loss = outputs.loss
 
-# Fungsi untuk membersihkan deskripsi dari kata-kata yang tidak relevan
-def clean_description(description):
-    irrelevant_words = ["random_word1", "random_word2"]  # Sesuaikan daftar ini dengan kata-kata yang ingin dihilangkan
-    for word in irrelevant_words:
-        description = re.sub(r'\b' + word + r'\b', '', description)
-    return description.strip()
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
-# Fungsi untuk menggabungkan generasi, validasi, dan pembersihan deskripsi
-def generate_and_validate(seed_text, max_length=150, keywords=None):
-    if keywords is None:
-        keywords = ["muscle", "body"]  # Kata kunci umum jika tidak ada yang spesifik
-    
-    description = generate_exercise_description_gpt(seed_text, max_length, keywords)
-    if not validate_description(description, keywords):
-        print("Description not relevant. Regenerating...")
-        description = generate_exercise_description_gpt(seed_text, max_length, keywords)
-    
-    description = clean_description(description)
-    return description
+                epoch_loss += loss.item()
+            except IndexError as e:
+                print(f"IndexError encountered: {e}. Skipping batch...")
+                continue  # Skip problematic batch
+        print(f"Epoch {epoch + 1} Loss: {epoch_loss / len(dataloader)}")
 
-# Fungsi saran latihan dengan validasi
-def suggest_exercises_with_validation(current_weight, target_weight, exercise_level):
-    weight_difference = current_weight - target_weight
-    filtered_exercises = data[data['Level'] == exercise_level]
-    
-    if weight_difference > 10:
-        recommended_exercises = filtered_exercises[(filtered_exercises['Type'] == 'Strength') | (filtered_exercises['Type'] == 'Cardio')]
-    else:
-        recommended_exercises = filtered_exercises[(filtered_exercises['Type'] == 'Strength') | (filtered_exercises['Type'] == 'Mild Cardio')]
-    
-    # Menampilkan jumlah hasil rekomendasi
-    print(f"\nNumber of recommended exercises: {len(recommended_exercises)}\n")
-    print(f"Recommended exercises for {exercise_level} level to achieve your target weight:\n")
-    
-    for idx, row in recommended_exercises.head(10).iterrows():
-        title = row['Title']
-        keywords = ["chest", "arm", "strength"] if title.lower() == "push-up" else ["muscle", "body"]
-        description = generate_and_validate(title, 150, keywords)
-        
-        print(f"{idx+1}. {title}")
-        print(f"   Description: {description}")
-        print(f"   Body Part: {row['BodyPart']}")
-        print(f"   Equipment: {row['Equipment']}")
-        print("-" * 50)
-    
-    return recommended_exercises  # Return recommended exercises for feedback loop
+# Prepare dataset for T5 training
+t5_tokenizer = T5Tokenizer.from_pretrained("t5-small")
+t5_model = T5ForConditionalGeneration.from_pretrained("t5-small")
 
-# Fungsi untuk menyimpan feedback pengguna ke file CSV
-def save_feedback(title, description, rating):
-    feedback_df = pd.DataFrame([[title, description, rating]], columns=['Title', 'GeneratedDescription', 'Rating'])
-    if os.path.exists('feedback_data.csv'):
-        feedback_df.to_csv('feedback_data.csv', mode='a', header=False, index=False)
-    else:
-        feedback_df.to_csv('feedback_data.csv', mode='w', header=True, index=False)
-    print("Feedback saved.")
+t5_training_data = [{
+    "input_text": row['text'],
+    "target_text": row['Desc']  # Use specific description as target
+} for _, row in data.iterrows()]
 
-# Input pengguna
-current_weight = float(input("Enter your current weight (kg): "))
-target_weight = float(input("Enter your target weight (kg): "))
-exercise_level = input("Enter your exercise level (Beginner/Intermediate/Expert): ")
+t5_dataset = ExerciseDataset(t5_training_data)
 
-# Panggil fungsi saran latihan dan simpan hasilnya
-recommended_exercises = suggest_exercises_with_validation(current_weight, target_weight, exercise_level)
+# Train T5
+fine_tune_t5(t5_model, t5_tokenizer, t5_dataset, epochs=3)
 
-# Proses penilaian untuk hasil generasi
-for i in range(min(3, len(recommended_exercises))):  # Loop untuk maksimal 3 latihan pertama sebagai contoh
-    row = recommended_exercises.iloc[i]
-    title = row['Title']
-    description = generate_and_validate(title, 150)
-    print(f"\nExercise: {title}")
-    print(f"Generated Description: {description}")
-    
-    rating = int(input("Rate the description (1-5): "))
-    save_feedback(title, description, rating)
+# User input for height and weight
+height = float(input("Enter your height in cm: "))
+weight = float(input("Enter your current weight in kg: "))
+ideal_weight = calculate_ideal_weight(height, weight)
+
+print(f"Your ideal weight based on your height ({height} cm) is approximately {ideal_weight:.2f} kg.")
+
+# Generate exercise recommendation
+exercise_recommendation = recommend_exercise(gpt2_model, gpt2_tokenizer, weight, ideal_weight)
+print(f"Recommended exercise: {exercise_recommendation}")
+
+print("Training completed for GPT-2 and T5.")
