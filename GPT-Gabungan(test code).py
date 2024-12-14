@@ -1,5 +1,5 @@
 import pandas as pd
-from transformers import AutoTokenizer, AutoModelForCausalLM, Trainer, TrainingArguments
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModelForSeq2SeqLM, Trainer, TrainingArguments
 from torch.utils.data import Dataset
 import os
 
@@ -53,16 +53,16 @@ def preprocess_and_merge(datasets):
     final_dataset.fillna("Tidak Tersedia", inplace=True)
     return final_dataset
 
-def train_model(model, tokenizer, datasets):
+def train_model(model, tokenizer, datasets, model_name):
     texts = preprocess_and_merge(datasets)['Exercise'].tolist()
     train_dataset = TokenizedDataset(texts, tokenizer)
 
     training_args = TrainingArguments(
-        output_dir="./model_checkpoint",
+        output_dir=f"./model_checkpoint_{model_name.replace('/', '_')}",
         per_device_train_batch_size=4,
         num_train_epochs=3,
         save_steps=500,
-        logging_dir="./logs",
+        logging_dir=f"./logs_{model_name.replace('/', '_')}",
         logging_steps=100,
         overwrite_output_dir=True,
     )
@@ -83,46 +83,55 @@ def generate_response(prompt, model, tokenizer):
         num_beams=5, 
         temperature=0.7, 
         top_p=0.9, 
+        do_sample=True,  # Mengaktifkan sampling untuk output lebih bervariasi
         no_repeat_ngram_size=2, 
         early_stopping=True
     )
+    print("DEBUG: Generated Output (Raw):", tokenizer.decode(outputs[0], skip_special_tokens=False))  # Debugging
     response = tokenizer.decode(outputs[0], skip_special_tokens=True)
     return response
 
 def main():
-    global tokenizer, model
-    MODEL_NAME = "EleutherAI/gpt-neo-125M"
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    models_to_use = {
+        "EleutherAI/gpt-neo-125M": AutoModelForCausalLM,
+        "gpt2": AutoModelForCausalLM,
+        "t5-small": AutoModelForSeq2SeqLM
+    }
 
     TRAIN_MODEL = False  # Saklar untuk melatih ulang atau memuat model
     #Set TRAIN_MODEL = True untuk melatih ulang dan TRAIN_MODEL = False untuk memuat model yang ada.
 
-    if TRAIN_MODEL:
-        os.makedirs("./final_model", exist_ok=True)
-        model = AutoModelForCausalLM.from_pretrained(MODEL_NAME)
-        datasets = ["Dataset/megaGymDataset.csv", "Dataset/exercise_dataset.csv", "Dataset/Top 50 Excerice for your body.csv"]
-        print("Memulai pelatihan model...")
-        train_model(model, tokenizer, datasets)
-        model.save_pretrained("./final_model")
-        tokenizer.save_pretrained("./final_model")
-        print("Pelatihan model selesai.")
-    else:
-        if not os.path.exists("./final_model"):
-            raise FileNotFoundError("Direktori './final_model' tidak ditemukan. Latih ulang model terlebih dahulu.")
-        print("Memuat model yang sudah dilatih...")
-        model = AutoModelForCausalLM.from_pretrained("./final_model")
-        tokenizer = AutoTokenizer.from_pretrained("./final_model")
-        print("Model berhasil dimuat.")
+    datasets = ["Dataset/megaGymDataset.csv", "Dataset/exercise_dataset.csv", "Dataset/Top 50 Exercise for your body.csv"]
 
-    while True:
-        prompt = input("Masukkan pertanyaan atau prompt (ketik 'exit' untuk keluar): ")
-        if prompt.lower() == 'exit':
-            print("Keluar dari program.")
-            break
-        response = generate_response(prompt, model, tokenizer)
-        print("AI: ", response)
+    for model_name, model_class in models_to_use.items():
+        print(f"Using model: {model_name}")
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        model = model_class.from_pretrained(model_name)
+
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        if TRAIN_MODEL:
+            print(f"Training {model_name}...")
+            train_model(model, tokenizer, datasets, model_name)
+            model.save_pretrained(f"./final_model_{model_name.replace('/', '_')}" )
+            tokenizer.save_pretrained(f"./final_model_{model_name.replace('/', '_')}" )
+            print(f"Model {model_name} trained and saved.")
+        else:
+            model_path = f"./final_model_{model_name.replace('/', '_')}"
+            if not os.path.exists(model_path):
+                raise FileNotFoundError(f"Model directory {model_path} not found. Train the model first.")
+            print(f"Loading model from {model_path}...")
+            model = model_class.from_pretrained(model_path)
+            tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+        while True:
+            prompt = input(f"{model_name} - Masukkan pertanyaan atau prompt (ketik 'exit' untuk keluar): ")
+            if prompt.lower() == 'exit':
+                print(f"Keluar dari {model_name}.")
+                break
+            response = generate_response(prompt, model, tokenizer)
+            print(f"{model_name} AI: ", response)
 
 if __name__ == "__main__":
     main()
