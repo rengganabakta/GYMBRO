@@ -20,15 +20,18 @@ class TokenizedDataset(Dataset):
         return {
             "input_ids": self.inputs["input_ids"][idx],
             "attention_mask": self.inputs["attention_mask"][idx],
-            "labels": self.inputs["input_ids"][idx],  # For causal LM, input_ids are used as labels
+            "labels": self.inputs["input_ids"][idx],
         }
 
 def preprocess_and_merge(datasets):
     merged_data = []
     
     for file_path in datasets:
-        df = pd.read_csv(file_path)
+        if not os.path.exists(file_path):
+            print(f"Peringatan: File tidak ditemukan {file_path}, dilewati.")
+            continue
         
+        df = pd.read_csv(file_path)
         if "Title" in df.columns:
             df["Exercise"] = df["Title"]
             df["Description"] = df["Desc"]
@@ -45,34 +48,19 @@ def preprocess_and_merge(datasets):
             df["MuscleGroup"] = "Umum"
             df["Level"] = "Bervariasi"
         else:
-            raise ValueError(f"Tidak dapat memproses dataset {file_path}")
+            print(f"Peringatan: Format dataset tidak dikenali {file_path}, dilewati.")
+            continue
         
         merged_data.append(df[["Exercise", "Description", "MuscleGroup", "Level"]])
 
-    final_dataset = pd.concat(merged_data, ignore_index=True).drop_duplicates()
-    final_dataset.fillna("Tidak Tersedia", inplace=True)
-    return final_dataset
-
-def train_model(model, tokenizer, datasets, model_name):
-    texts = preprocess_and_merge(datasets)['Exercise'].tolist()
-    train_dataset = TokenizedDataset(texts, tokenizer)
-
-    training_args = TrainingArguments(
-        output_dir=f"./model_checkpoint_{model_name.replace('/', '_')}",
-        per_device_train_batch_size=4,
-        num_train_epochs=3,
-        save_steps=500,
-        logging_dir=f"./logs_{model_name.replace('/', '_')}",
-        logging_steps=100,
-        overwrite_output_dir=True,
-    )
-
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-    )
-    trainer.train()
+    if merged_data:
+        final_dataset = pd.concat(merged_data, ignore_index=True).drop_duplicates()
+        final_dataset.fillna("Tidak Tersedia", inplace=True)
+        print(f"Dataset berhasil diproses. Jumlah data: {len(final_dataset)}")
+        return final_dataset
+    else:
+        print("Peringatan: Tidak ada dataset yang berhasil diproses.")
+        return pd.DataFrame(columns=["Exercise", "Description", "MuscleGroup", "Level"])
 
 def generate_response(prompt, model, tokenizer):
     inputs = tokenizer(prompt, return_tensors="pt", padding=True, truncation=True)
@@ -83,13 +71,20 @@ def generate_response(prompt, model, tokenizer):
         num_beams=5, 
         temperature=0.7, 
         top_p=0.9, 
-        do_sample=True,  # Mengaktifkan sampling untuk output lebih bervariasi
+        do_sample=True,
         no_repeat_ngram_size=2, 
         early_stopping=True
     )
-    print("DEBUG: Generated Output (Raw):", tokenizer.decode(outputs[0], skip_special_tokens=False))  # Debugging
     response = tokenizer.decode(outputs[0], skip_special_tokens=True)
     return response
+
+def route_prompt(prompt):
+    if any(word in prompt.lower() for word in ["exercise", "workout", "training", "gym"]):
+        return "EleutherAI/gpt-neo-125M"
+    elif any(word in prompt.lower() for word in ["explain", "summarize", "define"]):
+        return "t5-small"
+    else:
+        return "gpt2"
 
 def main():
     models_to_use = {
@@ -97,41 +92,38 @@ def main():
         "gpt2": AutoModelForCausalLM,
         "t5-small": AutoModelForSeq2SeqLM
     }
+    model_cache = {}
+    datasets = ["Dataset/megaGymDataset.csv", "Dataset/exercise_dataset.csv", "Dataset/Top 50 Excerice for your body.csv"]
+    
+    # Preprocess datasets first
+    print("Memproses dataset...")
+    processed_data = preprocess_and_merge(datasets)
+    if processed_data.empty:
+        print("Dataset kosong. Program dihentikan.")
+        return
 
-    TRAIN_MODEL = False  # Saklar untuk melatih ulang atau memuat model
-    #Set TRAIN_MODEL = True untuk melatih ulang dan TRAIN_MODEL = False untuk memuat model yang ada.
+    # Load models
+    while True:
+        prompt = input("Masukkan pertanyaan atau prompt (ketik 'exit' untuk keluar): ")
+        if prompt.lower() == 'exit':
+            print("Keluar dari program.")
+            break
 
-    datasets = ["Dataset/megaGymDataset.csv", "Dataset/exercise_dataset.csv", "Dataset/Top 50 Exercise for your body.csv"]
+        model_name = route_prompt(prompt)
+        print(f"Menggunakan model: {model_name}")
 
-    for model_name, model_class in models_to_use.items():
-        print(f"Using model: {model_name}")
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        model = model_class.from_pretrained(model_name)
+        if model_name not in model_cache:
+            print("Memuat model...")
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+            model_class = models_to_use[model_name]
+            model = model_class.from_pretrained(model_name)
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
+            model_cache[model_name] = (model, tokenizer)
 
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-
-        if TRAIN_MODEL:
-            print(f"Training {model_name}...")
-            train_model(model, tokenizer, datasets, model_name)
-            model.save_pretrained(f"./final_model_{model_name.replace('/', '_')}" )
-            tokenizer.save_pretrained(f"./final_model_{model_name.replace('/', '_')}" )
-            print(f"Model {model_name} trained and saved.")
-        else:
-            model_path = f"./final_model_{model_name.replace('/', '_')}"
-            if not os.path.exists(model_path):
-                raise FileNotFoundError(f"Model directory {model_path} not found. Train the model first.")
-            print(f"Loading model from {model_path}...")
-            model = model_class.from_pretrained(model_path)
-            tokenizer = AutoTokenizer.from_pretrained(model_path)
-
-        while True:
-            prompt = input(f"{model_name} - Masukkan pertanyaan atau prompt (ketik 'exit' untuk keluar): ")
-            if prompt.lower() == 'exit':
-                print(f"Keluar dari {model_name}.")
-                break
-            response = generate_response(prompt, model, tokenizer)
-            print(f"{model_name} AI: ", response)
+        model, tokenizer = model_cache[model_name]
+        response = generate_response(prompt, model, tokenizer)
+        print("AI:", response)
 
 if __name__ == "__main__":
     main()
