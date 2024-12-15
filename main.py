@@ -62,7 +62,7 @@ def train_gpt2(model, tokenizer, dataset, epochs=3, batch_size=8, lr=5e-5):
                 loss.backward()
                 optimizer.step()
 
-                epoch_loss += loss.item()
+                epoch_loss += loss.item() 
             except IndexError as e:
                 print(f"IndexError encountered: {e}. Skipping batch...")
                 continue  # Skip problematic batch

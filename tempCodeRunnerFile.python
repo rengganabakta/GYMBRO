@@ -1,0 +1,172 @@
+# Path: gym_assistant/main.py
+
+import pandas as pd
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import os
+from dotenv import load_dotenv
+import torch
+from torch.utils.data import Dataset, DataLoader
+from transformers import AdamW
+import re
+
+# Memuat variabel lingkungan dari file .env
+load_dotenv()
+dataset_paths = [
+    os.getenv('DATASET_PATH'),      # Dataset lama
+    os.getenv('DATASET_NEW_1'),    # Dataset baru 1
+    os.getenv('DATASET_NEW_2')     # Dataset baru 2
+]
+
+# Load tokenizer dan model
+tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neo-1.3B")
+model = AutoModelForCausalLM.from_pretrained("EleutherAI/gpt-neo-1.3B")
+
+# Dataset custom untuk pelatihan
+class TextDataset(Dataset):
+    def __init__(self, texts, tokenizer, max_length):
+        self.texts = texts
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+
+    def __len__(self):
+        return len(self.texts)
+
+    def __getitem__(self, idx):
+        text = self.texts[idx]
+        inputs = self.tokenizer(
+            text, truncation=True, padding='max_length', max_length=self.max_length, return_tensors='pt'
+        )
+        return {
+            'input_ids': inputs['input_ids'].squeeze(0),
+            'attention_mask': inputs['attention_mask'].squeeze(0)
+        }
+
+# Fungsi pelatihan
+def train_model_on_dataset(dataset_path, model, tokenizer, epochs=1, batch_size=4, lr=5e-5):
+    print(f"Training on dataset: {dataset_path}")
+    try:
+        # Muat dataset
+        data = pd.read_csv(dataset_path)
+        if 'Name of Exercise' in data.columns:
+            texts = data['Name of Exercise'].tolist()
+        elif 'Activity' in data.columns:
+            texts = data['Activity'].tolist()
+        else:
+            raise ValueError("Unsupported dataset format.")
+
+        # Preprocessing dataset
+        dataset = TextDataset(texts, tokenizer, max_length=128)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+        # Optimizer
+        optimizer = AdamW(model.parameters(), lr=lr)
+
+        # Pelatihan
+        model.train()
+        for epoch in range(epochs):
+            print(f"Epoch {epoch + 1}/{epochs}")
+            for batch in dataloader:
+                optimizer.zero_grad()
+                outputs = model(
+                    input_ids=batch['input_ids'].to('cuda'),
+                    attention_mask=batch['attention_mask'].to('cuda'),
+                    labels=batch['input_ids'].to('cuda')
+                )
+                loss = outputs.loss
+                loss.backward()
+                optimizer.step()
+                print(f"Loss: {loss.item()}")
+
+    except Exception as e:
+        print(f"Error during training on {dataset_path}: {e}")
+
+# Pipeline pelatihan bertahap
+def train_pipeline():
+    for dataset_path in dataset_paths:
+        train_model_on_dataset(dataset_path, model, tokenizer)
+
+# Fungsi untuk menghasilkan deskripsi latihan
+def generate_exercise_description(seed_text, max_length=150, keywords=None):
+    input_ids = tokenizer.encode(seed_text, return_tensors='pt')
+    output = model.generate(
+        input_ids,
+        max_length=max_length,
+        num_return_sequences=1,
+        no_repeat_ngram_size=4,
+        top_p=0.85,
+        temperature=0.7,
+        do_sample=True,
+        pad_token_id=tokenizer.eos_token_id
+    )
+    generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
+    if keywords and not all(keyword.lower() in generated_text.lower() for keyword in keywords):
+        return generate_exercise_description(seed_text, max_length, keywords)
+    return generated_text
+
+# Fungsi validasi input pengguna
+def validate_input(prompt, value_type=float, valid_options=None):
+    while True:
+        try:
+            user_input = value_type(input(prompt))
+            if valid_options and user_input not in valid_options:
+                raise ValueError("Invalid option.")
+            return user_input
+        except Exception as e:
+            print(f"Invalid input: {e}. Please try again.")
+
+# Perhitungan BMI
+def calculate_bmi(weight, height):
+    height_in_m = height / 100
+    bmi = weight / (height_in_m ** 2)
+    return round(bmi, 2)
+
+# Fungsi saran latihan berdasarkan BMI
+def suggest_exercises(current_weight, target_weight, height, exercise_level):
+    bmi = calculate_bmi(current_weight, height)
+    weight_difference = current_weight - target_weight
+    filtered_exercises = dataset_combined[dataset_combined['Difficulty Level'] == exercise_level.capitalize()]
+    
+    # Klasifikasi saran berdasarkan BMI
+    if bmi >= 25 or weight_difference > 10:
+        recommended_exercises = filtered_exercises[
+            filtered_exercises['Benefit'].str.contains('Strength|Cardio', case=False)
+        ]
+    else:
+        recommended_exercises = filtered_exercises[
+            filtered_exercises['Benefit'].str.contains('Strength|Mild Cardio', case=False)
+        ]
+    return recommended_exercises
+
+# Fungsi utama
+def main():
+    print("Welcome to Gym Assistant GPT!")
+    current_weight = validate_input("Enter your current weight (kg): ", float)
+    height = validate_input("Enter your height (cm): ", float)
+    target_weight = validate_input("Enter your target weight (kg): ", float)
+    exercise_level = validate_input("Enter your exercise level (Beginner/Intermediate/Expert): ", str, 
+                                    ["Beginner", "Intermediate", "Expert"])
+    
+    bmi = calculate_bmi(current_weight, height)
+    print(f"\nYour BMI is: {bmi} (Classification: {'Overweight' if bmi >= 25 else 'Normal'})")
+    
+    recommended_exercises = suggest_exercises(current_weight, target_weight, height, exercise_level)
+    print(f"\nRecommended exercises for your level ({exercise_level}):")
+    
+    for idx, row in recommended_exercises.head(5).iterrows():
+        title = row['Activity']
+        keywords = ["muscle", "body"]
+        description = generate_exercise_description(title, 150, keywords)
+        print(f"\n{idx + 1}. {title}")
+        print(f"   Description: {description}")
+        print(f"   Target Muscle Group: {row['Target Muscle Group']}")
+        print(f"   Equipment Needed: {row['Equipment Needed']}")
+        print("-" * 50)
+
+if __name__ == "__main__":
+    # Latih model terlebih dahulu
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    model.to(device)
+    train_pipeline()
+
+    # Jalankan fungsi utama
+    main()
