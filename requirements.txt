@@ -4,3 +4,4 @@ sentencepiece
 pandas
 tqdm
 python-dotenv
+sacremoses
