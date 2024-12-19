@@ -9,10 +9,14 @@ translator_tokenizer = MarianTokenizer.from_pretrained(translation_model_name)
 translator_model = MarianMTModel.from_pretrained(translation_model_name)
 
 def translate_prompt(prompt, target_language="en"):
-    inputs = translator_tokenizer(prompt, return_tensors="pt", padding=True, truncation=True)
-    translated_tokens = translator_model.generate(**inputs)
-    translated_prompt = translator_tokenizer.decode(translated_tokens[0], skip_special_tokens=True)
-    return translated_prompt
+    try:
+        inputs = translator_tokenizer(prompt, return_tensors="pt", padding=True, truncation=True)
+        translated_tokens = translator_model.generate(**inputs)
+        translated_prompt = translator_tokenizer.decode(translated_tokens[0], skip_special_tokens=True)
+        return translated_prompt
+    except Exception as e:
+        print(f"Terjadi kesalahan dalam penerjemahan: {e}")
+        return prompt
 
 # Load Model for Fine-Tuning
 def load_model_and_tokenizer(model_name):
@@ -53,6 +57,8 @@ def preprocess_and_merge(datasets):
     for file_path in datasets:
         if not os.path.exists(file_path):
             print(f"Peringatan: File tidak ditemukan {file_path}, dilewati.")
+            with open("missing_files.log", "a") as log_file:
+                log_file.write(f"File tidak ditemukan: {file_path}\n")
             continue
         
         df = pd.read_csv(file_path)
@@ -81,23 +87,22 @@ def preprocess_and_merge(datasets):
         return pd.DataFrame(columns=["Exercise", "Description"])
 
 # Train Model
-def fine_tune_model(processed_data, model_name):
+def fine_tune_model(processed_data, model_name, model, tokenizer):
     texts = (processed_data["Exercise"] + ": " + processed_data["Description"]).tolist()
     print(f"Melatih model {model_name} menggunakan dataset dengan {len(texts)} sampel.")
     if len(texts) == 0:
         print("Tidak ada data untuk pelatihan. Pastikan dataset telah diproses dengan benar.")
         return
 
-    model, tokenizer = load_model_and_tokenizer(model_name)
     train_dataset = TokenizedDataset(texts, tokenizer)
 
     training_args = TrainingArguments(
         output_dir=f"./model_checkpoint_{model_name.replace('/', '_')}",
         per_device_train_batch_size=4,
         per_device_eval_batch_size=4,
-        num_train_epochs=6,
+        num_train_epochs=10,
         learning_rate=2e-5,
-        evaluation_strategy="epoch",
+        evaluation_strategy="no",
         save_strategy="epoch",
         save_total_limit=2,
         logging_dir=f"./logs_{model_name.replace('/', '_')}",
@@ -116,14 +121,14 @@ def fine_tune_model(processed_data, model_name):
     print(f"Model {model_name} berhasil dilatih dan disimpan.")
 
 # Generate Response
-def generate_response(prompt, model, tokenizer):
+def generate_response(prompt, model, tokenizer, max_length=150):
     translated_prompt = translate_prompt(prompt, "en")
-    formatted_prompt = f"Provide detailed fitness advice for: {translated_prompt}."
-    inputs = tokenizer(formatted_prompt, return_tensors="pt", padding=True, truncation=True)
+    formatted_prompt = f"You are a fitness assistant. Suggest specific exercises with detailed instructions for: {translated_prompt}."
+    inputs = tokenizer(formatted_prompt, return_tensors="pt", padding=True, truncation=True, max_length=max_length)
     outputs = model.generate(
         inputs.input_ids, 
         attention_mask=inputs.attention_mask, 
-        max_length=150,  # Jawaban lebih singkat
+        max_length=max_length,  
         num_beams=5, 
         temperature=0.7, 
         top_p=0.9, 
@@ -136,29 +141,21 @@ def generate_response(prompt, model, tokenizer):
 
 # Main Program
 def main():
-    datasets = ["Dataset/megaGymDataset.csv", "Dataset/exercise_dataset.csv", "Dataset/Top 50 Excerice for your body.csv"]
-    print("Memproses dataset...")
-    processed_data = preprocess_and_merge(datasets)
-    if processed_data.empty:
-        print("Dataset kosong. Program dihentikan.")
-        return
-
     TRAIN_MODEL = True
-    model_names = ["EleutherAI/gpt-neo-125M", "gpt2", "t5-small"]
+
+    datasets = ["Dataset/megaGymDataset.csv", "Dataset/exercise_dataset.csv", "Dataset/Top 50 Excerice for your body.csv"]
+    processed_data = preprocess_and_merge(datasets)
+    model_name = "EleutherAI/gpt-neo-125M"
+    model, tokenizer = load_model_and_tokenizer(model_name)
 
     if TRAIN_MODEL:
-        for model_name in model_names:
-            fine_tune_model(processed_data, model_name)
+        fine_tune_model(processed_data, model_name, model, tokenizer)
 
     while True:
         prompt = input("Masukkan pertanyaan atau prompt (ketik 'exit' untuk keluar): ")
         if prompt.lower() == 'exit':
-            print("Keluar dari program.")
             break
-
-        model_name = "EleutherAI/gpt-neo-125M"
-        model, tokenizer = load_model_and_tokenizer(model_name)
-        response = generate_response(prompt, model, tokenizer)
+        response = generate_response(prompt, model, tokenizer, max_length=150)
         print("AI:", response)
 
 if __name__ == "__main__":
