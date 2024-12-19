@@ -1,1 +1,3 @@
 .env
+model_checkpoint_EleutherAI_gpt-neo-125M
+final_model_EleutherAI_gpt-neo-125M
