@@ -23,8 +23,8 @@ texts = data['text'].values
 gpt2_tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
 gpt2_model = GPT2LMHeadModel.from_pretrained("gpt2")
 
-# Load T5 model dan tokenizer
-t5_tokenizer = T5Tokenizer.from_pretrained("t5-small")
+# Load T5 model dan tokenizer dengan legacy=False
+t5_tokenizer = T5Tokenizer.from_pretrained("t5-small", legacy=False)
 t5_model = T5ForConditionalGeneration.from_pretrained("t5-small")
 
 # Fungsi untuk menghasilkan deskripsi dengan GPT-2
@@ -85,7 +85,15 @@ def generate_combined_descriptions(seed_text, num_words=150, keywords=None):
         return combined_result
 
 # Fungsi utama untuk pengguna
-def suggest_exercises_with_dual_models(current_weight, target_weight, exercise_level):
+def suggest_exercises_with_dual_models(current_weight, height, exercise_level):
+    # Hitung BMI dan target weight
+    bmi = current_weight / (height ** 2)
+    target_bmi = 22.5  # Target BMI ideal
+    target_weight = target_bmi * (height ** 2)
+    
+    print(f"Your current BMI is: {bmi:.2f}")
+    print(f"Your target weight for a BMI of {target_bmi:.1f} is: {target_weight:.2f} kg")
+
     weight_difference = current_weight - target_weight
     filtered_exercises = data[data['Level'] == exercise_level]
     if weight_difference > 10:
@@ -93,7 +101,7 @@ def suggest_exercises_with_dual_models(current_weight, target_weight, exercise_l
     else:
         recommended_exercises = filtered_exercises[(filtered_exercises['Type'] == 'Strength') | (filtered_exercises['Type'] == 'Mild Cardio')]
     print(f"\nNumber of recommended exercises: {len(recommended_exercises)}\n")
-    print(f"Recommended exercises for {exercise_level} level to achieve your target weight:\n")
+    print(f"Recommended exercises for {exercise_level} level to achieve your target BMI:\n")
     for idx, row in recommended_exercises.head(10).iterrows():
         title = row['Title']
         keywords = ["chest", "arm", "strength"] if title.lower() == "push-up" else ["muscle", "body"]
@@ -107,8 +115,8 @@ def suggest_exercises_with_dual_models(current_weight, target_weight, exercise_l
 
 # Input pengguna
 current_weight = float(input("Enter your current weight (kg): "))
-target_weight = float(input("Enter your target weight (kg): "))
+height = float(input("Enter your height (m): "))
 exercise_level = input("Enter your exercise level (Beginner/Intermediate/Expert): ")
 
 # Panggil fungsi utama
-recommended_exercises = suggest_exercises_with_dual_models(current_weight, target_weight, exercise_level)
+recommended_exercises = suggest_exercises_with_dual_models(current_weight, height, exercise_level)
